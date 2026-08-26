@@ -18,14 +18,10 @@ from app.ml.train import MODEL_DIR, HORIZONS
 async def lifespan(app: FastAPI):
     init_db()
 
-    # Seed port/vessel reference master data (idempotent upsert)
-    # so the maritime endpoints always have data to answer with.
     db = SessionLocal()
+
     try:
         seed_reference_data(db)
-
-        # Keep the Model Intelligence page backed by the real
-        # validation results shipped with the trained models.
         seed_model_run_history(db)
     finally:
         db.close()
@@ -46,21 +42,21 @@ app = FastAPI(
 
 
 # ============================================================
-# CORS CONFIGURATION
+# CORS
 # ============================================================
-# Allows the deployed Vercel frontend to communicate with
-# this Render backend, while preserving local development URLs.
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        # Production frontend
+        # Main Vercel production domain
         "https://freight-puce.vercel.app",
 
-        # Vite development
+        # Current Vercel deployment URL shown by browser
+        "https://freight-no7hyyp8j-divyanshu19283-maxs-projects.vercel.app",
+
+        # Local Vite development
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-
-        # Alternate Vite ports
         "http://localhost:5174",
         "http://127.0.0.1:5174",
 
@@ -104,17 +100,10 @@ def root():
 
 def seed_model_run_history(db):
     """
-    Populate model_runs from the bundled, real training-evaluation
-    metadata.
+    Populate model_runs from the bundled training-evaluation metadata.
 
-    The trained models and their validation metrics are shipped with
-    the project. Older databases may contain the freight/forecast
-    tables but have an empty model_runs table, which makes the Model
-    Intelligence chart appear blank.
-
-    This idempotent sync makes the leaderboard and chart available
-    on both a fresh SQLite demo DB and a production
-    PostgreSQL/Supabase DB without fabricating metrics.
+    This keeps the Model Intelligence page populated on fresh
+    SQLite/demo databases and production PostgreSQL databases.
     """
 
     meta_dir = os.path.join(
@@ -133,6 +122,7 @@ def seed_model_run_history(db):
     written = 0
 
     for horizon in HORIZONS:
+
         meta_path = os.path.join(
             meta_dir,
             f"model_h{horizon}_meta.json",
@@ -149,7 +139,7 @@ def seed_model_run_history(db):
             ) as f:
                 meta = json.load(f)
 
-        except (OSError, ValueError):
+        except (OSError, ValueError, TypeError):
             continue
 
         leaderboard = meta.get("leaderboard", {})
@@ -167,40 +157,51 @@ def seed_model_run_history(db):
                 .first()
             )
 
-            values = {
-                "training_start": date_type.fromisoformat(
-                    meta["training_start"]
-                ),
-                "training_end": date_type.fromisoformat(
-                    meta["training_end"]
-                ),
-                "mae": float(
-                    metrics.get("mae", 0)
-                ),
-                "rmse": float(
-                    metrics.get("rmse", 0)
-                ),
-                "mape": float(
-                    metrics.get("mape", 0)
-                ),
-                "r2": metrics.get("r2"),
-                "training_rows": int(
-                    meta.get("training_rows", 0)
-                ),
-                "horizon_days": int(horizon),
-                "is_best_model": (
-                    model_name == meta.get("best_model")
-                ),
-            }
+            try:
+                values = {
+                    "training_start": date_type.fromisoformat(
+                        meta["training_start"]
+                    ),
+                    "training_end": date_type.fromisoformat(
+                        meta["training_end"]
+                    ),
+                    "mae": float(
+                        metrics.get("mae", 0)
+                    ),
+                    "rmse": float(
+                        metrics.get("rmse", 0)
+                    ),
+                    "mape": float(
+                        metrics.get("mape", 0)
+                    ),
+                    "r2": (
+                        float(metrics["r2"])
+                        if metrics.get("r2") is not None
+                        else None
+                    ),
+                    "training_rows": int(
+                        meta.get("training_rows", 0)
+                    ),
+                    "horizon_days": int(horizon),
+                    "is_best_model": (
+                        model_name == meta.get("best_model")
+                    ),
+                }
+
+            except (KeyError, TypeError, ValueError):
+                continue
 
             if existing is None:
+
                 db.add(
                     ModelRun(
                         model_name=model_name,
                         **values,
                     )
                 )
+
             else:
+
                 for key, value in values.items():
                     setattr(
                         existing,
@@ -223,16 +224,8 @@ def seed_model_run_history(db):
 @app.get("/health")
 def health():
     """
-    Reports database connectivity and whether trained forecast
-    models are present on disk.
-
-    The frontend uses this endpoint to display real backend state
-    rather than a static status string.
+    Reports database connectivity and trained model availability.
     """
-
-    # --------------------------------------------------------
-    # Database status
-    # --------------------------------------------------------
 
     db_status = "disconnected"
 
@@ -249,11 +242,6 @@ def health():
     except Exception:
         db_status = "disconnected"
 
-
-    # --------------------------------------------------------
-    # Model status
-    # --------------------------------------------------------
-
     model_loaded = all(
         os.path.exists(
             os.path.join(
@@ -263,11 +251,6 @@ def health():
         )
         for h in HORIZONS
     )
-
-
-    # --------------------------------------------------------
-    # Response
-    # --------------------------------------------------------
 
     return {
         "status": "healthy",
