@@ -1,93 +1,196 @@
-// Single shared HTTP client. Every domain module (forecast.ts, market.ts,
-// charter.ts, ports.ts, ...) calls `request()` from here — components never
-// call fetch() directly and no URL is ever hardcoded outside this file.
-//
-// Base URL is configurable via VITE_API_BASE_URL (existing convention in
-// this project) with VITE_API_URL accepted as an alias, so either name
-// works: VITE_API_URL=http://localhost:8000
+// Shared HTTP client for the Freight Intelligence frontend.
+// All API modules should use request() from this file.
 
 const RAW_BASE =
-  import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8001';
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_URL ||
+  "https://freight-sih-backend.onrender.com";
 
-export const BASE = String(RAW_BASE).replace(/\/$/, '');
+export const BASE = String(RAW_BASE).replace(/\/+$/, "");
 
 export class ApiClientError extends Error {
-  kind: 'offline' | 'error' | 'no-data' | 'validation' | 'server' | 'unknown';
-  constructor(kind: ApiClientError['kind'], message: string) {
+  kind: "offline" | "error" | "no-data" | "validation" | "server" | "unknown";
+
+  constructor(
+    kind: ApiClientError["kind"],
+    message: string,
+  ) {
     super(message);
     this.kind = kind;
-    this.name = 'ApiClientError';
+    this.name = "ApiClientError";
   }
 }
 
-/** True when the error means "backend unreachable / broken", i.e. safe to
- * fall back to clearly-labeled demo data rather than showing a hard error. */
 export const isOffline = (e: unknown): boolean =>
-  e instanceof ApiClientError && (e.kind === 'offline' || e.kind === 'server' || e.kind === 'unknown');
+  e instanceof ApiClientError &&
+  (e.kind === "offline" ||
+    e.kind === "server" ||
+    e.kind === "unknown");
 
 function extractMessage(body: unknown): string | null {
   if (!body) return null;
-  if (typeof body === 'string') return body;
-  if (typeof body === 'object' && body) {
+
+  if (typeof body === "string") {
+    return body;
+  }
+
+  if (typeof body === "object" && body !== null) {
     const b = body as Record<string, unknown>;
-    for (const k of ['detail', 'message', 'error', 'error_description']) {
-      const v = b[k];
-      if (typeof v === 'string') return v;
-      if (Array.isArray(v) && v.length && typeof v[0] === 'object' && v[0] && 'msg' in v[0]) {
-        return String((v[0] as Record<string, unknown>).msg);
+
+    for (const key of [
+      "detail",
+      "message",
+      "error",
+      "error_description",
+    ]) {
+      const value = b[key];
+
+      if (typeof value === "string") {
+        return value;
+      }
+
+      if (
+        Array.isArray(value) &&
+        value.length > 0 &&
+        typeof value[0] === "object" &&
+        value[0] !== null &&
+        "msg" in value[0]
+      ) {
+        return String(
+          (value[0] as Record<string, unknown>).msg,
+        );
       }
     }
   }
+
   return null;
 }
 
-export async function request<T>(path: string, init?: RequestInit, timeoutMs = 9000): Promise<T> {
+export async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  timeoutMs = 15000,
+): Promise<T> {
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  const url = `${BASE}${cleanPath}`;
+
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  const timeout = window.setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
   try {
-    const res = await fetch(`${BASE}${path}`, {
+    const response = await fetch(url, {
       ...init,
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...(init.headers ?? {}),
+      },
     });
-    if (!res.ok) {
-      if (res.status >= 500) throw new ApiClientError('server', 'The freight backend could not complete this request.');
-      let body: unknown;
+
+    if (!response.ok) {
+      let body: unknown = null;
+
       try {
-        body = await res.json();
+        body = await response.json();
       } catch {
-        /* ignore */
+        // Response was not JSON.
       }
-      const msg = extractMessage(body) ?? `Request failed (${res.status}).`;
-      if (res.status === 404 || /no (historical )?data/i.test(msg) || /not found/i.test(msg) || /route.*(not|unavailable)/i.test(msg)) {
-        throw new ApiClientError('no-data', "That route and vessel combination isn't available. Please choose another route.");
+
+      const message =
+        extractMessage(body) ||
+        `Request failed with status ${response.status}.`;
+
+      if (response.status >= 500) {
+        throw new ApiClientError(
+          "server",
+          "The freight backend could not complete this request.",
+        );
       }
-      if (res.status === 400 || res.status === 422) {
-        throw new ApiClientError('validation', msg || 'The selected route or request values are not valid. Please choose a valid route and try again.');
+
+      if (response.status === 404) {
+        throw new ApiClientError(
+          "no-data",
+          `API endpoint not found: ${cleanPath}`,
+        );
       }
-      throw new ApiClientError('error', msg);
+
+      if (response.status === 400 || response.status === 422) {
+        throw new ApiClientError(
+          "validation",
+          message,
+        );
+      }
+
+      throw new ApiClientError(
+        "error",
+        message,
+      );
     }
-    return (await res.json()) as T;
-  } catch (e) {
-    if (e instanceof ApiClientError) throw e;
-    if (e instanceof DOMException && e.name === 'AbortError') {
-      throw new ApiClientError('offline', 'Backend temporarily unavailable. Your interface is still available.');
+
+    // Handle empty successful responses.
+    if (response.status === 204) {
+      return undefined as T;
     }
-    if (e instanceof TypeError) {
-      throw new ApiClientError('offline', 'Backend temporarily unavailable. Your interface is still available.');
+
+    const contentType =
+      response.headers.get("content-type") || "";
+
+    if (!contentType.includes("application/json")) {
+      const text = await response.text();
+
+      if (!text) {
+        return undefined as T;
+      }
+
+      return text as T;
     }
-    throw new ApiClientError('unknown', 'Something went wrong while processing this request.');
+
+    return (await response.json()) as T;
+  } catch (error) {
+    if (error instanceof ApiClientError) {
+      throw error;
+    }
+
+    if (
+      error instanceof DOMException &&
+      error.name === "AbortError"
+    ) {
+      throw new ApiClientError(
+        "offline",
+        "Backend request timed out. Please try again.",
+      );
+    }
+
+    if (error instanceof TypeError) {
+      throw new ApiClientError(
+        "offline",
+        "Unable to connect to the freight backend.",
+      );
+    }
+
+    throw new ApiClientError(
+      "unknown",
+      "Something went wrong while processing this request.",
+    );
   } finally {
-    clearTimeout(t);
+    window.clearTimeout(timeout);
   }
 }
 
-/** Quick reachability probe used by the status strip. */
-export async function probeBackend(): Promise<'online' | 'offline'> {
+/**
+ * Checks whether the deployed Render backend is reachable.
+ */
+export async function probeBackend(): Promise<
+  "online" | "offline"
+> {
   try {
-    await request('/health', undefined, 4000);
-    return 'online';
+    await request("/health", undefined, 5000);
+    return "online";
   } catch {
-    return 'offline';
+    return "offline";
   }
 }
