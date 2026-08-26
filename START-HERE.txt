@@ -1,0 +1,18 @@
+FREIGHT NAVIGATOR - START HERE
+
+Extract the ZIP once. If Windows created a folder named freight-final-sih-26006-COMPLETE-ROBUST, enter that folder.
+
+TERMINAL 1 (backend):
+cd backend
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
+
+TERMINAL 2 (frontend):
+npm install
+npm run dev
+
+Open http://localhost:5173
+
+Keep both terminals open.

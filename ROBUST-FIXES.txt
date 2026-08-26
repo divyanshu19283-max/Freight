@@ -1,0 +1,7 @@
+ROBUST FIXES v3
+
+1. Route validation: forecast/optimization route queries NEVER use demo routes. They wait for the live /api/data/routes response. This prevents invalid demo-only destinations (e.g. China/Europe) from causing backend 400 errors.
+2. Route selector compares origin/destination/vessel case-insensitively and reconciles stale selections to a live valid combination.
+3. Model Intelligence: fixed the bundled metadata path. The previous code looked under backend/app/data/trained_models, while the real files are under backend/data/trained_models. The API now correctly fills missing DB model-run rows from the three real metadata files.
+4. Existing API 400/422 messages remain surfaced as readable validation errors.
+5. Frontend API base remains http://127.0.0.1:8001.
